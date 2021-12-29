@@ -1,0 +1,22 @@
+#### 背景
+开发过程中需要整理数据库设计文档，上传到svn，因为编写markdown文档时，基本上都是复制粘贴，并且开发过程中数据库表结构还会变动，维护起来比较麻烦。因此开发此工具，一键生成数据库设计文档。
+该工具直接读取数据库里面的表结构来生成文档，如果数据库里的表结构字段类型和注释不完善，需要自己去修改。
+
+#### 使用
+
+```shell
+# 帮助函数
+➜  mysql_markdown -h
+flag needs an argument: -h
+Usage: mysql_markdown [options...]
+--help  This help text
+-h      host.     default 127.0.0.1
+-u      username. default root
+-p      password. default root
+-d      database. default mysql
+-P      port.     default 3306
+-c      charset.  default utf8
+-o      output.   default current location
+-t      tables.   default all table and support ',' separator for filter, every item can use regexp
+
+#### 简单使用
