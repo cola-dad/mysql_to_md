@@ -6,9 +6,9 @@
 
 ```shell
 # 帮助函数
-➜  mysql_markdown -h
+➜  go run main.go -h
 flag needs an argument: -h
-Usage: mysql_markdown [options...]
+Usage: mysql_to_md [options...]
 --help  This help text
 -h      host.     default 127.0.0.1
 -u      username. default root
@@ -18,5 +18,9 @@ Usage: mysql_markdown [options...]
 -c      charset.  default utf8
 -o      output.   default current location
 -t      tables.   default all table and support ',' separator for filter, every item can use regexp
-
+```
 #### 简单使用
+例如要导出test数据库里面的表结构文档
+```
+go run main.go -h 127.0.0.1 -u root -p 123456 -d test -P 3306
+```

@@ -299,5 +299,5 @@ func main() {
 	// close database and file handler for release
 	err = db.Close()
 	err = mdFile.Close()
-	fmt.Printf("\033[32mmysql_markdown finished ... \033[0m \n")
+	fmt.Printf("\033[32mmysql_to_md finished ... \033[0m \n")
 }
