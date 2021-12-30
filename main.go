@@ -10,21 +10,24 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"gorm.io/driver/clickhouse"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
 /**
 Database Configuration
 */
 var (
-	host     = flag.String("h", "127.0.0.1", "host(127.0.0.1)")
-	username = flag.String("u", "root", "username(root)")
-	password = flag.String("p", "root", "password(root)")
-	database = flag.String("d", "mysql", "database(mysql)")
-	port     = flag.Int("P", 3306, "port(3306)")
-	charset  = flag.String("c", "utf8", "charset(utf8)")
-	output   = flag.String("o", "", "output location")
-	tables   = flag.String("t", "", "choose tables")
+	dialselect = flag.String("s", "mysql", "dialselect(mysql)")
+	host       = flag.String("h", "127.0.0.1", "host(127.0.0.1)")
+	username   = flag.String("u", "root", "username(root)")
+	password   = flag.String("p", "root", "password(root)")
+	database   = flag.String("d", "mysql", "database(mysql)")
+	port       = flag.Int("P", 3306, "port(3306)")
+	charset    = flag.String("c", "utf8", "charset(utf8)")
+	output     = flag.String("o", "", "output location")
+	tables     = flag.String("t", "", "choose tables")
 )
 
 /**
@@ -32,12 +35,11 @@ Structured Query Language
 */
 const (
 	// SqlTables 查看数据库所有数据表SQL
-	SqlTables = "SELECT `table_name`,`table_comment` FROM `information_schema`.`tables` WHERE `table_schema`=?"
+	SqlTables = "SELECT `table_name`,`table_comment` FROM `information_schema`.`tables` WHERE `table_schema`='%s'"
 	// SqlTableColumn 查看数据表列信息SQL
-	SqlTableColumn = "SELECT `ORDINAL_POSITION`,`COLUMN_NAME`,`COLUMN_TYPE`,`COLUMN_KEY`,`IS_NULLABLE`,`EXTRA`,`COLUMN_COMMENT`,`COLUMN_DEFAULT` FROM `information_schema`.`columns` WHERE `table_schema`=? AND `table_name`=? ORDER BY `ORDINAL_POSITION` ASC"
+	SqlTableColumn = "SELECT `ORDINAL_POSITION`,`COLUMN_NAME`,`COLUMN_TYPE`,`COLUMN_KEY`,`IS_NULLABLE`,`EXTRA`,`COLUMN_COMMENT`,`COLUMN_DEFAULT` FROM `information_schema`.`columns` WHERE `table_schema`='%s' AND `table_name`='%s' ORDER BY `ORDINAL_POSITION` ASC"
 	// SqlTableCreate 查看建表语句
 	SqlTableCreate = "SHOW CREATE TABLE %s"
-
 )
 
 /**
@@ -63,34 +65,35 @@ type tableInfo struct {
 }
 
 type tableCreateSql struct {
-	Table    string         `db:"Table"`
+	Table     string `db:"Table"`
 	CreateSql string `db:"Create Table"`
 }
 
 /**
 connect mysql service
 */
-func connect() (*sql.DB, error) {
+func connect() (db *gorm.DB, err error) {
 	// generate dataSourceName
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s", *username, *password, *host, *port, *database, *charset)
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		fmt.Printf("mysql sql open failed, detail is [%v]", err)
-		return db, err
+	switch *dialselect {
+	case "mysql":
+		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	case "clickhouse":
+		db, err = gorm.Open(clickhouse.Open(dsn), &gorm.Config{})
 	}
-
 	return db, err
 }
 
 /**
 query table info about scheme
 */
-func queryTables(db *sql.DB, dbName string) ([]tableInfo, error) {
+func queryTables(db *gorm.DB, dbName string) ([]tableInfo, error) {
 	var tableCollect []tableInfo
 	var tableArray []string
 	var commentArray []sql.NullString
 
-	rows, err := db.Query(SqlTables, dbName)
+	fmt.Println(fmt.Sprintf(SqlTables, dbName))
+	rows, err := db.Exec(fmt.Sprintf(SqlTables, dbName)).Rows()
 	if err != nil {
 		return tableCollect, err
 	}
@@ -138,11 +141,11 @@ func queryTables(db *sql.DB, dbName string) ([]tableInfo, error) {
 /**
 query table column message
 */
-func queryTableColumn(db *sql.DB, dbName string, tableName string) ([]tableColumn, error) {
+func queryTableColumn(db *gorm.DB, dbName string, tableName string) ([]tableColumn, error) {
 	// 定义承载列信息的切片
 	var columns []tableColumn
 
-	rows, err := db.Query(SqlTableColumn, dbName, tableName)
+	rows, err := db.Exec(fmt.Sprintf(SqlTableColumn, dbName, tableName)).Rows()
 	if err != nil {
 		fmt.Printf("execute query table column action error, detail is [%v]\n", err.Error())
 		return columns, err
@@ -168,12 +171,12 @@ func queryTableColumn(db *sql.DB, dbName string, tableName string) ([]tableColum
 	return columns, err
 }
 
-func queryCreateSql(db *sql.DB, tableName string) (string,error) {
+func queryCreateSql(db *gorm.DB, tableName string) (string, error) {
 	var createSql tableCreateSql
 	var err error
-	rows, err := db.Query(fmt.Sprintf(SqlTableCreate,tableName))
+	rows, err := db.Exec(fmt.Sprintf(SqlTableCreate, tableName)).Rows()
 	for rows.Next() {
-		rows.Scan(&createSql.Table,&createSql.CreateSql)
+		rows.Scan(&createSql.Table, &createSql.CreateSql)
 	}
 	if err != nil {
 		fmt.Printf("execute query table create sql error, detail is [%v]\n", err.Error())
@@ -181,7 +184,7 @@ func queryCreateSql(db *sql.DB, tableName string) (string,error) {
 	}
 	reg := regexp.MustCompile(`AUTO_INCREMENT=\d+ `)
 	res := reg.ReplaceAllString(createSql.CreateSql, "")
-	return res,nil
+	return res, nil
 }
 
 /**
@@ -208,6 +211,7 @@ func init() {
 	flag.CommandLine.Usage = func() {
 		fmt.Println("Usage: mysql_to_md [options...]\n" +
 			"--help  This help text" + "\n" +
+			"-s      dial select.     default mysql" + "\n" +
 			"-h      host.     default 127.0.0.1" + "\n" +
 			"-u      username. default root" + "\n" +
 			"-p      password. default root" + "\n" +
@@ -273,7 +277,7 @@ func main() {
 			fmt.Printf("\033[31mqueryTableColumn  error ... \033[0m \n%v\n", err.Error())
 			return
 		}
-		var createSql,createSqlErr = queryCreateSql(db, table.Name)
+		var createSql, createSqlErr = queryCreateSql(db, table.Name)
 		if createSqlErr != nil {
 			fmt.Printf("\033[31mqueryCreateSql error ... \033[0m \n%v\n", err.Error())
 			return
@@ -287,7 +291,7 @@ func main() {
 				info.ColumnKey.String,
 				info.IsNullable,
 				info.ColumnDefault.String,
-				strings.ReplaceAll(strings.ReplaceAll(info.ColumnComment.String,"|","\\|"), "\n", ""),
+				strings.ReplaceAll(strings.ReplaceAll(info.ColumnComment.String, "|", "\\|"), "\n", ""),
 			)
 		}
 		tableContent += "\n\n```sql\n"
@@ -297,7 +301,6 @@ func main() {
 	mdFile.WriteString(tableContent)
 
 	// close database and file handler for release
-	err = db.Close()
 	err = mdFile.Close()
 	fmt.Printf("\033[32mmysql_to_md finished ... \033[0m \n")
 }
