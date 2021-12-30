@@ -74,11 +74,13 @@ connect mysql service
 */
 func connect() (db *gorm.DB, err error) {
 	// generate dataSourceName
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s", *username, *password, *host, *port, *database, *charset)
+
 	switch *dialselect {
 	case "mysql":
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s", *username, *password, *host, *port, *database, *charset)
 		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	case "clickhouse":
+		dsn := fmt.Sprintf("tcp://%s:%d?database=%s&username=%s&password=%s", *host, *port, *database, *username, *password)
 		db, err = gorm.Open(clickhouse.Open(dsn), &gorm.Config{})
 	}
 	return db, err
@@ -93,7 +95,7 @@ func queryTables(db *gorm.DB, dbName string) ([]tableInfo, error) {
 	var commentArray []sql.NullString
 
 	fmt.Println(fmt.Sprintf(SqlTables, dbName))
-	rows, err := db.Exec(fmt.Sprintf(SqlTables, dbName)).Rows()
+	rows, err := db.Raw(fmt.Sprintf(SqlTables, dbName)).Rows()
 	if err != nil {
 		return tableCollect, err
 	}
@@ -145,7 +147,7 @@ func queryTableColumn(db *gorm.DB, dbName string, tableName string) ([]tableColu
 	// 定义承载列信息的切片
 	var columns []tableColumn
 
-	rows, err := db.Exec(fmt.Sprintf(SqlTableColumn, dbName, tableName)).Rows()
+	rows, err := db.Raw(fmt.Sprintf(SqlTableColumn, dbName, tableName)).Rows()
 	if err != nil {
 		fmt.Printf("execute query table column action error, detail is [%v]\n", err.Error())
 		return columns, err
@@ -174,7 +176,7 @@ func queryTableColumn(db *gorm.DB, dbName string, tableName string) ([]tableColu
 func queryCreateSql(db *gorm.DB, tableName string) (string, error) {
 	var createSql tableCreateSql
 	var err error
-	rows, err := db.Exec(fmt.Sprintf(SqlTableCreate, tableName)).Rows()
+	rows, err := db.Raw(fmt.Sprintf(SqlTableCreate, tableName)).Rows()
 	for rows.Next() {
 		rows.Scan(&createSql.Table, &createSql.CreateSql)
 	}
@@ -263,9 +265,12 @@ func main() {
 		fmt.Printf("%d/%d the %s table is making ...\n", index+1, len(tables), table.Name)
 
 		// markdown header title
-		tableContent += "#### " + strconv.Itoa(index+1) + "、 " + table.Name + "\n"
-		if table.Comment.String != "" {
-			tableContent += table.Comment.String + "\n"
+		if table.Comment.String == "" {
+			// markdown header title
+			tableContent += "#### " + strconv.Itoa(index+1) + "、 " + table.Name + "\n"
+		} else {
+			// markdown header title
+			tableContent += "#### " + strconv.Itoa(index+1) + "、 " + table.Name + "-" + table.Comment.String + "\n"
 		}
 
 		// markdown table header
