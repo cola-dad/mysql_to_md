@@ -36,8 +36,13 @@ Structured Query Language
 const (
 	// SqlTables 查看数据库所有数据表SQL
 	SqlTables = "SELECT `table_name`,`table_comment` FROM `information_schema`.`tables` WHERE `table_schema`='%s'"
+	// CHSqlTables 查看数据库所有数据表SQL-clickhouse
+	CHSqlTables = "SELECT  `table` as table_name,'' as table_comment from system.parts where database ='%s' group by table_name"
+
 	// SqlTableColumn 查看数据表列信息SQL
-	SqlTableColumn = "SELECT `ORDINAL_POSITION`,`COLUMN_NAME`,`COLUMN_TYPE`,`COLUMN_KEY`,`IS_NULLABLE`,`EXTRA`,`COLUMN_COMMENT`,`COLUMN_DEFAULT` FROM `information_schema`.`columns` WHERE `table_schema`='%s' AND `table_name`='%s' ORDER BY `ORDINAL_POSITION` ASC"
+	SqlTableColumn = "SELECT `ORDINAL_POSITION`,`COLUMN_NAME`,`COLUMN_TYPE`,`COLUMN_KEY`,`IS_NULLABLE`,`COLUMN_COMMENT`,`COLUMN_DEFAULT` FROM `information_schema`.`columns` WHERE `table_schema`='%s' AND `table_name`='%s' ORDER BY `ORDINAL_POSITION` ASC"
+	// CHSqlTableColumn 查看数据表列信息SQL-clickhouse
+	CHSqlTableColumn = "SELECT  `position` as ORDINAL_POSITION,name as COLUMN_NAME,type as  COLUMN_TYPE,is_in_partition_key as COLUMN_KEY, '' as IS_NULLABLE,comment  as COLUMN_COMMENT,default_expression  as COLUMN_DEFAULT from system.columns where database = '%s' and table = '%s'"
 	// SqlTableCreate 查看建表语句
 	SqlTableCreate = "SHOW CREATE TABLE %s"
 )
@@ -51,7 +56,6 @@ type tableColumn struct {
 	ColumnType      string         `db:"COLUMN_TYPE"`      // type
 	ColumnKey       sql.NullString `db:"COLUMN_KEY"`       // key
 	IsNullable      string         `db:"IS_NULLABLE"`      // nullable
-	Extra           sql.NullString `db:"EXTRA"`            // extra
 	ColumnComment   sql.NullString `db:"COLUMN_COMMENT"`   // comment
 	ColumnDefault   sql.NullString `db:"COLUMN_DEFAULT"`   // default value
 }
@@ -67,6 +71,11 @@ type tableInfo struct {
 type tableCreateSql struct {
 	Table     string `db:"Table"`
 	CreateSql string `db:"Create Table"`
+}
+
+
+type chTableCreateSql struct {
+	CreateSql string `db:"statement"`
 }
 
 /**
@@ -94,8 +103,12 @@ func queryTables(db *gorm.DB, dbName string) ([]tableInfo, error) {
 	var tableArray []string
 	var commentArray []sql.NullString
 
-	fmt.Println(fmt.Sprintf(SqlTables, dbName))
-	rows, err := db.Raw(fmt.Sprintf(SqlTables, dbName)).Rows()
+	querySql := SqlTables
+	if *dialselect == "clickhouse" {
+		querySql = CHSqlTables
+	}
+	fmt.Println(fmt.Sprintf(querySql, dbName))
+	rows, err := db.Raw(fmt.Sprintf(querySql, dbName)).Rows()
 	if err != nil {
 		return tableCollect, err
 	}
@@ -147,7 +160,12 @@ func queryTableColumn(db *gorm.DB, dbName string, tableName string) ([]tableColu
 	// 定义承载列信息的切片
 	var columns []tableColumn
 
-	rows, err := db.Raw(fmt.Sprintf(SqlTableColumn, dbName, tableName)).Rows()
+	querySql := SqlTableColumn
+	if *dialselect == "clickhouse" {
+		querySql = CHSqlTableColumn
+	}
+
+	rows, err := db.Raw(fmt.Sprintf(querySql, dbName, tableName)).Rows()
 	if err != nil {
 		fmt.Printf("execute query table column action error, detail is [%v]\n", err.Error())
 		return columns, err
@@ -160,7 +178,6 @@ func queryTableColumn(db *gorm.DB, dbName string, tableName string) ([]tableColu
 			&column.ColumnType,
 			&column.ColumnKey,
 			&column.IsNullable,
-			&column.Extra,
 			&column.ColumnComment,
 			&column.ColumnDefault)
 		if err != nil {
@@ -187,6 +204,20 @@ func queryCreateSql(db *gorm.DB, tableName string) (string, error) {
 	reg := regexp.MustCompile(`AUTO_INCREMENT=\d+ `)
 	res := reg.ReplaceAllString(createSql.CreateSql, "")
 	return res, nil
+}
+
+func queryChCreateSql(db *gorm.DB, tableName string) (string, error) {
+	var createSql chTableCreateSql
+	var err error
+	rows, err := db.Raw(fmt.Sprintf(SqlTableCreate, tableName)).Rows()
+	for rows.Next() {
+		rows.Scan(&createSql.CreateSql)
+	}
+	if err != nil {
+		fmt.Printf("execute query table create sql error, detail is [%v]\n", err.Error())
+		return "", err
+	}
+	return createSql.CreateSql, nil
 }
 
 /**
@@ -282,11 +313,21 @@ func main() {
 			fmt.Printf("\033[31mqueryTableColumn  error ... \033[0m \n%v\n", err.Error())
 			return
 		}
-		var createSql, createSqlErr = queryCreateSql(db, table.Name)
-		if createSqlErr != nil {
-			fmt.Printf("\033[31mqueryCreateSql error ... \033[0m \n%v\n", err.Error())
-			return
+		var createSql string
+		if *dialselect == "clickhouse" {
+			 createSql, err = queryChCreateSql(db, table.Name)
+			if err != nil {
+				fmt.Printf("\033[31mqueryChCreateSql error ... \033[0m \n%v\n", err.Error())
+				return
+			}
+		}else{
+			 createSql, err = queryCreateSql(db, table.Name)
+			if err != nil {
+				fmt.Printf("\033[31mqueryCreateSql error ... \033[0m \n%v\n", err.Error())
+				return
+			}
 		}
+
 		for _, info := range columnInfo {
 			tableContent += fmt.Sprintf(
 				"| %d | %s | %s | %s | %s | %s | %s |\n",
