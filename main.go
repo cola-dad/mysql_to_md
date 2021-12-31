@@ -1,11 +1,12 @@
 package main
 
 import (
-	"database/sql"
-	"flag"
+	"errors"
 	"fmt"
+	"mysql_to_md/ch"
+	"mysql_to_md/common"
+	"mysql_to_md/mariadb"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,282 +16,57 @@ import (
 	"gorm.io/gorm"
 )
 
-/**
-Database Configuration
-*/
-var (
-	dialselect = flag.String("s", "mysql", "dialselect(mysql)")
-	host       = flag.String("h", "127.0.0.1", "host(127.0.0.1)")
-	username   = flag.String("u", "root", "username(root)")
-	password   = flag.String("p", "root", "password(root)")
-	database   = flag.String("d", "mysql", "database(mysql)")
-	port       = flag.Int("P", 3306, "port(3306)")
-	charset    = flag.String("c", "utf8", "charset(utf8)")
-	output     = flag.String("o", "", "output location")
-	tables     = flag.String("t", "", "choose tables")
-)
-
-/**
-Structured Query Language
-*/
-const (
-	// SqlTables 查看数据库所有数据表SQL
-	SqlTables = "SELECT `table_name`,`table_comment` FROM `information_schema`.`tables` WHERE `table_schema`='%s'"
-	// CHSqlTables 查看数据库所有数据表SQL-clickhouse
-	CHSqlTables = "SELECT  `table` as table_name,'' as table_comment from system.parts where database ='%s' group by table_name"
-
-	// SqlTableColumn 查看数据表列信息SQL
-	SqlTableColumn = "SELECT `ORDINAL_POSITION`,`COLUMN_NAME`,`COLUMN_TYPE`,`COLUMN_KEY`,`IS_NULLABLE`,`COLUMN_COMMENT`,`COLUMN_DEFAULT` FROM `information_schema`.`columns` WHERE `table_schema`='%s' AND `table_name`='%s' ORDER BY `ORDINAL_POSITION` ASC"
-	// CHSqlTableColumn 查看数据表列信息SQL-clickhouse
-	CHSqlTableColumn = "SELECT  `position` as ORDINAL_POSITION,name as COLUMN_NAME,type as  COLUMN_TYPE,is_in_partition_key as COLUMN_KEY, '' as IS_NULLABLE,comment  as COLUMN_COMMENT,default_expression  as COLUMN_DEFAULT from system.columns where database = '%s' and table = '%s'"
-	// SqlTableCreate 查看建表语句
-	SqlTableCreate = "SHOW CREATE TABLE %s"
-)
-
-/**
-struct for table column
-*/
-type tableColumn struct {
-	OrdinalPosition uint16         `db:"ORDINAL_POSITION"` // position
-	ColumnName      string         `db:"COLUMN_NAME"`      // name
-	ColumnType      string         `db:"COLUMN_TYPE"`      // type
-	ColumnKey       sql.NullString `db:"COLUMN_KEY"`       // key
-	IsNullable      string         `db:"IS_NULLABLE"`      // nullable
-	ColumnComment   sql.NullString `db:"COLUMN_COMMENT"`   // comment
-	ColumnDefault   sql.NullString `db:"COLUMN_DEFAULT"`   // default value
+// Handler md导出处理
+type Handler interface {
+	QueryTables() ([]common.TableInfo, error)
+	QueryTableColumn(tableName string) ([]common.TableColumn, error)
+	QueryCreateSql(tableName string) (string, error)
 }
 
-/**
-struct for table message
-*/
-type tableInfo struct {
-	Name    string         `db:"table_name"`    // name
-	Comment sql.NullString `db:"table_comment"` // comment
-}
-
-type tableCreateSql struct {
-	Table     string `db:"Table"`
-	CreateSql string `db:"Create Table"`
-}
-
-
-type chTableCreateSql struct {
-	CreateSql string `db:"statement"`
-}
-
-/**
-connect mysql service
-*/
-func connect() (db *gorm.DB, err error) {
+func newHandler() (Handler, error) {
 	// generate dataSourceName
-
-	switch *dialselect {
+	dbConf := common.GetDBConf()
+	switch dbConf.Dialselect {
 	case "mysql":
-		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s", *username, *password, *host, *port, *database, *charset)
-		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s", dbConf.Username, dbConf.Password, dbConf.Host, dbConf.Port, dbConf.Database, dbConf.Charset)
+		db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+		return &mariadb.Mariadb{DB: db, Conf: dbConf}, err
 	case "clickhouse":
-		dsn := fmt.Sprintf("tcp://%s:%d?database=%s&username=%s&password=%s", *host, *port, *database, *username, *password)
-		db, err = gorm.Open(clickhouse.Open(dsn), &gorm.Config{})
+		dsn := fmt.Sprintf("tcp://%s:%d?database=%s&username=%s&password=%s", dbConf.Host, dbConf.Port, dbConf.Database, dbConf.Username, dbConf.Password)
+		db, err := gorm.Open(clickhouse.Open(dsn), &gorm.Config{})
+		return &ch.Clickhouse{DB: db, Conf: dbConf}, err
 	}
-	return db, err
+	return nil, errors.New("no connect")
 }
 
-/**
-query table info about scheme
-*/
-func queryTables(db *gorm.DB, dbName string) ([]tableInfo, error) {
-	var tableCollect []tableInfo
-	var tableArray []string
-	var commentArray []sql.NullString
-
-	querySql := SqlTables
-	if *dialselect == "clickhouse" {
-		querySql = CHSqlTables
-	}
-	fmt.Println(fmt.Sprintf(querySql, dbName))
-	rows, err := db.Raw(fmt.Sprintf(querySql, dbName)).Rows()
-	if err != nil {
-		return tableCollect, err
-	}
-
-	for rows.Next() {
-		var info tableInfo
-		err = rows.Scan(&info.Name, &info.Comment)
-		if err != nil {
-			fmt.Printf("execute query tables action error,had ignored, detail is [%v]\n", err.Error())
-			continue
-		}
-
-		tableCollect = append(tableCollect, info)
-		tableArray = append(tableArray, info.Name)
-		commentArray = append(commentArray, info.Comment)
-	}
-	// filter tables when specified tables params
-	if *tables != "" {
-		tableCollect = nil
-		chooseTables := strings.Split(*tables, ",")
-		indexMap := make(map[int]int)
-		for _, item := range chooseTables {
-			subIndexMap := getTargetIndexMap(tableArray, item)
-			for k, v := range subIndexMap {
-				if _, ok := indexMap[k]; ok {
-					continue
-				}
-				indexMap[k] = v
-			}
-		}
-
-		if len(indexMap) != 0 {
-			for _, v := range indexMap {
-				var info tableInfo
-				info.Name = tableArray[v]
-				info.Comment = commentArray[v]
-				tableCollect = append(tableCollect, info)
-			}
-		}
-	}
-
-	return tableCollect, err
-}
-
-/**
-query table column message
-*/
-func queryTableColumn(db *gorm.DB, dbName string, tableName string) ([]tableColumn, error) {
-	// 定义承载列信息的切片
-	var columns []tableColumn
-
-	querySql := SqlTableColumn
-	if *dialselect == "clickhouse" {
-		querySql = CHSqlTableColumn
-	}
-
-	rows, err := db.Raw(fmt.Sprintf(querySql, dbName, tableName)).Rows()
-	if err != nil {
-		fmt.Printf("execute query table column action error, detail is [%v]\n", err.Error())
-		return columns, err
-	}
-	for rows.Next() {
-		var column tableColumn
-		err = rows.Scan(
-			&column.OrdinalPosition,
-			&column.ColumnName,
-			&column.ColumnType,
-			&column.ColumnKey,
-			&column.IsNullable,
-			&column.ColumnComment,
-			&column.ColumnDefault)
-		if err != nil {
-			fmt.Printf("query table column scan error, detail is [%v]\n", err.Error())
-			return columns, err
-		}
-		columns = append(columns, column)
-	}
-
-	return columns, err
-}
-
-func queryCreateSql(db *gorm.DB, tableName string) (string, error) {
-	var createSql tableCreateSql
-	var err error
-	rows, err := db.Raw(fmt.Sprintf(SqlTableCreate, tableName)).Rows()
-	for rows.Next() {
-		rows.Scan(&createSql.Table, &createSql.CreateSql)
-	}
-	if err != nil {
-		fmt.Printf("execute query table create sql error, detail is [%v]\n", err.Error())
-		return "", err
-	}
-	reg := regexp.MustCompile(`AUTO_INCREMENT=\d+ `)
-	res := reg.ReplaceAllString(createSql.CreateSql, "")
-	return res, nil
-}
-
-func queryChCreateSql(db *gorm.DB, tableName string) (string, error) {
-	var createSql chTableCreateSql
-	var err error
-	rows, err := db.Raw(fmt.Sprintf(SqlTableCreate, tableName)).Rows()
-	for rows.Next() {
-		rows.Scan(&createSql.CreateSql)
-	}
-	if err != nil {
-		fmt.Printf("execute query table create sql error, detail is [%v]\n", err.Error())
-		return "", err
-	}
-	return createSql.CreateSql, nil
-}
-
-/**
-get choose table index by regexp. then you can batch choose table like `time_zone\w`
-*/
-func getTargetIndexMap(tableNameArr []string, item string) map[int]int {
-	indexMap := make(map[int]int)
-	for i := 0; i < len(tableNameArr); i++ {
-		if match, _ := regexp.MatchString(item, tableNameArr[i]); match {
-			if _, ok := indexMap[i]; ok {
-				continue
-			}
-			indexMap[i] = i
-		}
-	}
-	return indexMap
-}
-
-/**
-init func
-*/
-func init() {
-	// init flag for command
-	flag.CommandLine.Usage = func() {
-		fmt.Println("Usage: mysql_to_md [options...]\n" +
-			"--help  This help text" + "\n" +
-			"-s      dial select.     default mysql" + "\n" +
-			"-h      host.     default 127.0.0.1" + "\n" +
-			"-u      username. default root" + "\n" +
-			"-p      password. default root" + "\n" +
-			"-d      database. default mysql" + "\n" +
-			"-P      port.     default 3306" + "\n" +
-			"-c      charset.  default utf8" + "\n" +
-			"-o      output.   default current location\n" +
-			"-t      tables.   default all table and support ',' separator for filter, every item can use regexp" +
-			"")
-		os.Exit(0)
-	}
-	flag.Parse()
-}
-
-/**
-main func
-*/
 func main() {
 	// connect mysql service
-	db, connectErr := connect()
+	handler, connectErr := newHandler()
 	if connectErr != nil {
 		fmt.Printf("\033[31mmysql sql open failed ... \033[0m \n")
 		return
 	}
-
 	// query all table name
-	tables, err := queryTables(db, *database)
+	tables, err := handler.QueryTables()
 
 	if err != nil {
 		fmt.Printf("\033[31mquery tables of database error ... \033[0m \n%v\n", err.Error())
 		return
 	}
-
+	dbConf := common.GetDBConf()
 	// create and open markdown file
-	if *output == "" {
+	if dbConf.Output == "" {
 		// automatically generated if no output file path is specified
-		*output = *database + "_" + time.Now().Format("20060102_150405") + ".md"
+		dbConf.Output = dbConf.Database + "_" + time.Now().Format("20060102_150405") + ".md"
 	}
-	mdFile, err := os.OpenFile(*output, os.O_APPEND|os.O_WRONLY|os.O_CREATE, os.ModePerm)
+	mdFile, err := os.OpenFile(dbConf.Output, os.O_APPEND|os.O_WRONLY|os.O_CREATE, os.ModePerm)
 	if err != nil {
 		fmt.Printf("\033[31mcreate and open markdown file error \033[0m \n%v\n", err.Error())
 		return
 	}
 
 	// make markdown format content
-	var tableContent = "## " + *database + " tables message\n"
+	var tableContent = "## " + dbConf.Database + " tables message\n"
 	for index, table := range tables {
 		// make content process log
 		fmt.Printf("%d/%d the %s table is making ...\n", index+1, len(tables), table.Name)
@@ -308,26 +84,16 @@ func main() {
 		tableContent += "\n" +
 			"| 序号 | 字段 | 类型 | 键 | 允许空 | 默认值 | 注释 |\n" +
 			"| :--: | :--: | :--: | :--: | :--: | :--: | :--: |\n"
-		var columnInfo, columnInfoErr = queryTableColumn(db, *database, table.Name)
+		var columnInfo, columnInfoErr = handler.QueryTableColumn(table.Name)
 		if columnInfoErr != nil {
 			fmt.Printf("\033[31mqueryTableColumn  error ... \033[0m \n%v\n", err.Error())
 			return
 		}
-		var createSql string
-		if *dialselect == "clickhouse" {
-			 createSql, err = queryChCreateSql(db, table.Name)
-			if err != nil {
-				fmt.Printf("\033[31mqueryChCreateSql error ... \033[0m \n%v\n", err.Error())
-				return
-			}
-		}else{
-			 createSql, err = queryCreateSql(db, table.Name)
-			if err != nil {
-				fmt.Printf("\033[31mqueryCreateSql error ... \033[0m \n%v\n", err.Error())
-				return
-			}
+		var createSql, err = handler.QueryCreateSql(table.Name)
+		if err != nil {
+			fmt.Printf("\033[31mqueryCreateSql error ... \033[0m \n%v\n", err.Error())
+			return
 		}
-
 		for _, info := range columnInfo {
 			tableContent += fmt.Sprintf(
 				"| %d | %s | %s | %s | %s | %s | %s |\n",
